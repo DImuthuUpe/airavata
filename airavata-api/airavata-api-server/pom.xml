@@ -93,6 +93,11 @@
             <artifactId>services-security</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <dependency>
+            <groupId>org.apache.airavata</groupId>
+            <artifactId>compute-account-provisioning</artifactId>
+            <version>${project.version}</version>
+        </dependency>
         <!--<dependency>-->
             <!--<groupId>org.apache.airavata</groupId>-->
             <!--<artifactId>group-manager</artifactId>-->
@@ -160,18 +165,8 @@
         </dependency>
         <dependency>
             <groupId>org.apache.airavata</groupId>
-            <artifactId>registry-api-stubs</artifactId>
-            <version>${project.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.airavata</groupId>
             <artifactId>profile-service-stubs</artifactId>
             <version>${project.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.airavata</groupId>
-            <artifactId>services-security</artifactId>
-            <version>0.17-SNAPSHOT</version>
         </dependency>
     </dependencies>
 

@@ -19,6 +19,7 @@
  */
 package org.apache.airavata.api.server.handler;
 
+import org.apache.airavata.accountprovisioning.*;
 import org.apache.airavata.api.Airavata;
 import org.apache.airavata.api.airavata_apiConstants;
 import org.apache.airavata.api.server.util.ThriftClientPool;
@@ -35,6 +36,9 @@ import org.apache.airavata.messaging.core.MessagingFactory;
 import org.apache.airavata.messaging.core.Publisher;
 import org.apache.airavata.messaging.core.Type;
 import org.apache.airavata.model.WorkflowModel;
+import org.apache.airavata.model.appcatalog.accountprovisioning.SSHAccountProvisioner;
+import org.apache.airavata.model.appcatalog.accountprovisioning.SSHAccountProvisionerConfigParam;
+import org.apache.airavata.model.appcatalog.accountprovisioning.SSHAccountProvisionerConfigParamType;
 import org.apache.airavata.model.appcatalog.appdeployment.ApplicationDeploymentDescription;
 import org.apache.airavata.model.appcatalog.appdeployment.ApplicationModule;
 import org.apache.airavata.model.appcatalog.appinterface.ApplicationInterfaceDescription;
@@ -120,12 +124,67 @@ public class AiravataServerHandler implements Airavata.Iface {
                     Integer.parseInt(ServerSettings.getCredentialStoreServerPort()));
 
             initSharingRegistry();
+            postInitDefaultGateway();
         } catch (ApplicationSettingsException e) {
             logger.error("Error occured while reading airavata-server properties..", e);
         } catch (AiravataException e) {
             logger.error("Error occured while reading airavata-server properties..", e);
         } catch (TException e) {
             logger.error("Error occured while reading airavata-server properties..", e);
+        }
+    }
+
+    /**
+     * This method creates a password token for the default gateway profile. Default gateway is originally initialized
+     * at the registry server but we can not add the password token at that step as the credential store is not initialized
+     * before registry server.
+     */
+    private void postInitDefaultGateway() {
+
+        RegistryService.Client registryClient = registryClientPool.getResource();
+        try {
+
+            GatewayResourceProfile gatewayResourceProfile = registryClient.getGatewayResourceProfile(ServerSettings.getDefaultUserGateway());
+            if (gatewayResourceProfile != null && gatewayResourceProfile.getCredentialStoreToken() == null) {
+
+                logger.debug("Starting to add the password credential for default gateway : " +
+                        ServerSettings.getDefaultUserGateway());
+
+                PasswordCredential passwordCredential = new PasswordCredential();
+                passwordCredential.setPortalUserName(ServerSettings.getDefaultUser());
+                passwordCredential.setGatewayId(ServerSettings.getDefaultUserGateway());
+                passwordCredential.setLoginUserName(ServerSettings.getDefaultUser());
+                passwordCredential.setPassword(ServerSettings.getDefaultUserPassword());
+                passwordCredential.setDescription("Credentials for default gateway");
+
+                CredentialStoreService.Client csClient = csClientPool.getResource();
+                String token = null;
+                try {
+                    logger.info("Creating password credential for default gateway");
+                    token = csClient.addPasswordCredential(passwordCredential);
+                    csClientPool.returnResource(csClient);
+                } catch (Exception ex) {
+                    logger.error("Failed to create the password credential for the default gateway : " +
+                            ServerSettings.getDefaultUserGateway(), ex);
+                    if (csClient != null) {
+                        csClientPool.returnBrokenResource(csClient);
+                    }
+                }
+
+                if (token != null) {
+                    logger.debug("Adding password credential token " + token +" to the default gateway : " + ServerSettings.getDefaultUserGateway());
+                    gatewayResourceProfile.setIdentityServerPwdCredToken(token);
+                    registryClient.updateGatewayResourceProfile(ServerSettings.getDefaultUserGateway(), gatewayResourceProfile);
+                }
+
+                registryClientPool.returnResource(registryClient);
+            }
+        } catch (Exception e) {
+            logger.error("Failed to add the password credentials for the default gateway", e);
+
+            if (registryClient != null) {
+                registryClientPool.returnBrokenResource(registryClient);
+            }
         }
     }
 
@@ -945,7 +1004,8 @@ public class AiravataServerHandler implements Airavata.Iface {
                 searchCriteria.setValue(gatewayId + ":PROJECT");
                 filters.add(searchCriteria);
                 sharingClient.searchEntities(authzToken.getClaimsMap().get(Constants.GATEWAY_ID),
-                        userName + "@" + gatewayId, filters, offset, limit).stream().forEach(p -> accessibleProjectIds.add(p.entityId));
+                        userName + "@" + gatewayId, filters, 0, -1).stream().forEach(p -> accessibleProjectIds
+                        .add(p.entityId));
                 List<Project> result = regClient.searchProjects(gatewayId, userName, accessibleProjectIds, new HashMap<>(), limit, offset);
                 registryClientPool.returnResource(regClient);
                 sharingClientPool.returnResource(sharingClient);
@@ -3964,6 +4024,86 @@ public class AiravataServerHandler implements Airavata.Iface {
         }
     }
 
+    @Override
+    @SecurityCheck
+    public List<SSHAccountProvisioner> getSSHAccountProvisioners(AuthzToken authzToken) throws InvalidRequestException, AiravataClientException, AiravataSystemException, AuthorizationException, TException {
+
+        List<SSHAccountProvisioner> sshAccountProvisioners = new ArrayList<>();
+        List<SSHAccountProvisionerProvider> sshAccountProvisionerProviders = SSHAccountProvisionerFactory.getSSHAccountProvisionerProviders();
+        for (SSHAccountProvisionerProvider provider : sshAccountProvisionerProviders) {
+            // TODO: Move this Thrift conversion to utility class
+            SSHAccountProvisioner sshAccountProvisioner = new SSHAccountProvisioner();
+            sshAccountProvisioner.setCanCreateAccount(provider.canCreateAccount());
+            sshAccountProvisioner.setCanInstallSSHKey(provider.canInstallSSHKey());
+            sshAccountProvisioner.setName(provider.getName());
+            List<SSHAccountProvisionerConfigParam> sshAccountProvisionerConfigParams = new ArrayList<>();
+            for (ConfigParam configParam : provider.getConfigParams()) {
+                SSHAccountProvisionerConfigParam sshAccountProvisionerConfigParam = new SSHAccountProvisionerConfigParam();
+                sshAccountProvisionerConfigParam.setName(configParam.getName());
+                sshAccountProvisionerConfigParam.setDescription(configParam.getDescription());
+                sshAccountProvisionerConfigParam.setIsOptional(configParam.isOptional());
+                switch (configParam.getType()){
+                    case STRING:
+                        sshAccountProvisionerConfigParam.setType(SSHAccountProvisionerConfigParamType.STRING);
+                        break;
+                    case CRED_STORE_PASSWORD_TOKEN:
+                        sshAccountProvisionerConfigParam.setType(SSHAccountProvisionerConfigParamType.CRED_STORE_PASSWORD_TOKEN);
+                        break;
+                }
+                sshAccountProvisionerConfigParams.add(sshAccountProvisionerConfigParam);
+            }
+            sshAccountProvisioner.setConfigParams(sshAccountProvisionerConfigParams);
+            sshAccountProvisioners.add(sshAccountProvisioner);
+        }
+        return sshAccountProvisioners;
+    }
+
+    @Override
+    @SecurityCheck
+    public boolean doesUserHaveSSHAccount(AuthzToken authzToken, String computeResourceId, String userId) throws InvalidRequestException, AiravataClientException, AiravataSystemException, AuthorizationException, TException {
+        try {
+            String gatewayId = authzToken.getClaimsMap().get(Constants.GATEWAY_ID);
+            return SSHAccountManager.doesUserHaveSSHAccount(gatewayId, computeResourceId, userId);
+        } catch (Exception e) {
+            String errorMessage = "Error occurred while checking if [" + userId + "] has an SSH Account on [" +
+                    computeResourceId + "].";
+            logger.error(errorMessage, e);
+            AiravataSystemException exception = new AiravataSystemException();
+            exception.setAiravataErrorType(AiravataErrorType.INTERNAL_ERROR);
+            exception.setMessage(errorMessage + " More info : " + e.getMessage());
+            throw exception;
+        }
+    }
+
+    @Override
+    @SecurityCheck
+    public UserComputeResourcePreference setupUserComputeResourcePreferencesForSSH(AuthzToken authzToken, String computeResourceId, String userId, String airavataCredStoreToken) throws InvalidRequestException, AiravataClientException, AiravataSystemException, AuthorizationException, TException {
+        String gatewayId = authzToken.getClaimsMap().get(Constants.GATEWAY_ID);
+        CredentialStoreService.Client csClient = csClientPool.getResource();
+        SSHCredential sshCredential = null;
+        try {
+            sshCredential = csClient.getSSHCredential(airavataCredStoreToken, gatewayId);
+        }catch (Exception e){
+            logger.error("Error occurred while retrieving SSH Credential", e);
+            AiravataSystemException exception = new AiravataSystemException();
+            exception.setAiravataErrorType(AiravataErrorType.INTERNAL_ERROR);
+            exception.setMessage("Error occurred while retrieving SSH Credential. More info : " + e.getMessage());
+            csClientPool.returnBrokenResource(csClient);
+            throw exception;
+        }
+
+        try {
+            UserComputeResourcePreference userComputeResourcePreference = SSHAccountManager.setupSSHAccount(gatewayId, computeResourceId, userId, sshCredential);
+            return userComputeResourcePreference;
+        }catch (Exception e){
+            logger.error("Error occurred while automatically setting up SSH account for user [" + userId + "]", e);
+            AiravataSystemException exception = new AiravataSystemException();
+            exception.setAiravataErrorType(AiravataErrorType.INTERNAL_ERROR);
+            exception.setMessage("Error occurred while automatically setting up SSH account for user [" + userId + "]. More info : " + e.getMessage());
+            throw exception;
+        }
+    }
+
     /**
      * Register a User Resource Profile.
      *
@@ -4689,121 +4829,6 @@ public class AiravataServerHandler implements Airavata.Iface {
             exception.setMessage(msg + " More info : " + e.getMessage());
             sharingClientPool.returnBrokenResource(sharingClient);
             registryClientPool.returnBrokenResource(regClient);
-            throw exception;
-        }
-    }
-
-    @Override
-    @SecurityCheck
-    public String createGroup(AuthzToken authzToken, GroupModel groupModel) throws InvalidRequestException, AiravataClientException, AiravataSystemException, AuthorizationException, TException {
-        try {
-            //TODO Validations for authorization
-            SharingRegistryService.Client sharingClient = sharingClientPool.getResource();
-
-            UserGroup sharingUserGroup = new UserGroup();
-            sharingUserGroup.setGroupId(UUID.randomUUID().toString());
-            sharingUserGroup.setName(groupModel.getName());
-            sharingUserGroup.setDescription(groupModel.getDescription());
-            sharingUserGroup.setGroupType(GroupType.USER_LEVEL_GROUP);
-            sharingUserGroup.setDomainId(authzToken.getClaimsMap().get(Constants.GATEWAY_ID));
-
-            String groupId = sharingClient.createGroup(sharingUserGroup);
-            sharingClient.addUsersToGroup(authzToken.getClaimsMap().get(Constants.GATEWAY_ID), groupModel.getMembers(), groupId);
-            return groupId;
-        } catch (Exception e) {
-            String msg = "Error Creating Group" ;
-            logger.error(msg, e);
-            AiravataSystemException exception = new AiravataSystemException(AiravataErrorType.INTERNAL_ERROR);
-            exception.setMessage(msg + " More info : " + e.getMessage());
-            throw exception;
-        }
-    }
-
-    @Override
-    @SecurityCheck
-    public boolean updateGroup(AuthzToken authzToken, GroupModel groupModel) throws InvalidRequestException,
-            AiravataClientException, AiravataSystemException, AuthorizationException, TException {
-        try {
-            //TODO Validations for authorization
-            SharingRegistryService.Client sharingClient = sharingClientPool.getResource();
-
-            UserGroup sharingUserGroup = new UserGroup();
-            sharingUserGroup.setGroupId(groupModel.getId());
-            sharingUserGroup.setName(groupModel.getName());
-            sharingUserGroup.setDescription(groupModel.getDescription());
-            sharingUserGroup.setGroupType(GroupType.USER_LEVEL_GROUP);
-            sharingUserGroup.setDomainId(authzToken.getClaimsMap().get(Constants.GATEWAY_ID));
-
-            //adding and removal of users should be handle separately
-            sharingClient.updateGroup(sharingUserGroup);
-            return true;
-        } catch (Exception e) {
-            String msg = "Error Updating Group" ;
-            logger.error(msg, e);
-            AiravataSystemException exception = new AiravataSystemException(AiravataErrorType.INTERNAL_ERROR);
-            exception.setMessage(msg + " More info : " + e.getMessage());
-            throw exception;
-        }
-    }
-
-    @Override
-    @SecurityCheck
-    public boolean deleteGroup(AuthzToken authzToken, String groupId, String ownerId) throws
-            InvalidRequestException, AiravataClientException, AiravataSystemException, AuthorizationException, TException {
-        try {
-            //TODO Validations for authorization
-            SharingRegistryService.Client sharingClient = sharingClientPool.getResource();
-
-            sharingClient.deleteGroup(authzToken.getClaimsMap().get(Constants.GATEWAY_ID), groupId);
-            return true;
-        } catch (Exception e) {
-            String msg = "Error Deleting Group. Group ID: " + groupId ;
-            logger.error(msg, e);
-            AiravataSystemException exception = new AiravataSystemException(AiravataErrorType.INTERNAL_ERROR);
-            exception.setMessage(msg + " More info : " + e.getMessage());
-            throw exception;
-        }
-    }
-
-    @Override
-    @SecurityCheck
-    public GroupModel getGroup(AuthzToken authzToken, String groupId) throws InvalidRequestException,
-            AiravataClientException, AiravataSystemException, AuthorizationException, TException {
-        try {
-            SharingRegistryService.Client sharingClient = sharingClientPool.getResource();
-            UserGroup userGroup = sharingClient.getGroup(authzToken.getClaimsMap().get(Constants.GATEWAY_ID), groupId);
-
-            GroupModel groupModel = new GroupModel();
-            groupModel.setId(userGroup.getGroupId());
-            groupModel.setName(userGroup.getName());
-            groupModel.setDescription(userGroup.getDescription());
-            groupModel.setOwnerId(userGroup.getOwnerId());
-
-            sharingClient.getGroupMembersOfTypeUser(authzToken.getClaimsMap().get(Constants.GATEWAY_ID), groupId, 0, -1).stream().forEach(user->
-                    groupModel.addToMembers(user.getUserId())
-            );
-
-            return groupModel;
-        } catch (Exception e) {
-            String msg = "Error Retreiving Group. Group ID: " + groupId ;
-            logger.error(msg, e);
-            AiravataSystemException exception = new AiravataSystemException(AiravataErrorType.INTERNAL_ERROR);
-            exception.setMessage(msg + " More info : " + e.getMessage());
-            throw exception;
-        }
-    }
-
-    @Override
-    @SecurityCheck
-    public List<GroupModel> getAllGroupsUserBelongs(AuthzToken authzToken, String userName)
-            throws InvalidRequestException, AiravataClientException, AiravataSystemException, AuthorizationException, TException {
-        try {
-            throw new UnsupportedOperationException("Method not supported yet");
-        } catch (Exception e) {
-            String msg = "Error Retreiving All Groups for User. User ID: " + userName ;
-            logger.error(msg, e);
-            AiravataSystemException exception = new AiravataSystemException(AiravataErrorType.INTERNAL_ERROR);
-            exception.setMessage(msg + " More info : " + e.getMessage());
             throw exception;
         }
     }
