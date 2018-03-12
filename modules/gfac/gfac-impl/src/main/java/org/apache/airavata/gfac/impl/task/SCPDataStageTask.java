@@ -100,9 +100,9 @@ public class SCPDataStageTask implements Task {
                     return status;
                 } else {
                     if (processOutput.getType() == DataType.URI || processOutput.getType() == DataType.URI_COLLECTION || processOutput.getType() == DataType.STDOUT || processOutput.getType() == DataType.STDERR) {
-                        return transferFiles(processContext, subTaskModel, taskContext, processState);
+                        return transferFiles(processContext, subTaskModel, taskContext, processState, registryClient);
                     } else {
-                        return extractFromFile(subTaskModel, taskContext, processOutput.getApplicationArgument());
+                        return extractFromFile(subTaskModel, taskContext, processOutput.getApplicationArgument(), registryClient);
                     }
                 }
             } else if (processState == ProcessState.INPUT_DATA_STAGING) {
@@ -119,7 +119,7 @@ public class SCPDataStageTask implements Task {
                     }
                     return status;
                 } else {
-                    return transferFiles(processContext, subTaskModel, taskContext, processState);
+                    return transferFiles(processContext, subTaskModel, taskContext, processState, registryClient);
                 }
             } else {
                 status.setState(TaskState.FAILED);
@@ -140,7 +140,9 @@ public class SCPDataStageTask implements Task {
         }
     }
 
-    private TaskStatus extractFromFile(DataStagingTaskModel subTaskModel, TaskContext taskContext, String arguments) {
+    private TaskStatus extractFromFile(DataStagingTaskModel subTaskModel, TaskContext taskContext, String arguments,
+                                       RegistryService.Client registryClient) {
+
         TaskStatus status = new TaskStatus(TaskState.EXECUTING);
 
         try {
@@ -160,11 +162,20 @@ public class SCPDataStageTask implements Task {
                          }
 
                      }
-                     GFacUtils.saveExperimentOutput(taskContext.getParentProcessContext(), taskContext.getProcessOutput().getName(), result);
-                     GFacUtils.saveProcessOutput(taskContext.getParentProcessContext(), taskContext.getProcessOutput().getName(), result);
+                     GFacUtils.saveExperimentOutput(taskContext.getParentProcessContext(), registryClient, taskContext.getProcessOutput().getName(), result);
+                     GFacUtils.saveProcessOutput(taskContext.getParentProcessContext(), registryClient, taskContext.getProcessOutput().getName(), result);
 
                  } catch (IOException e) {
                      String msg = "Failed while reading from the file " + tempFile;
+                     log.error(msg, e);
+                     status.setState(TaskState.FAILED);
+                     status.setReason(msg);
+                     ErrorModel errorModel = new ErrorModel();
+                     errorModel.setActualErrorMessage(e.getMessage());
+                     errorModel.setUserFriendlyMessage(msg);
+                     taskContext.getTaskModel().setTaskErrors(Arrays.asList(errorModel));
+                 } catch (TException e) {
+                     String msg = "Failed saving process or experiment outputs in the registry";
                      log.error(msg, e);
                      status.setState(TaskState.FAILED);
                      status.setReason(msg);
@@ -189,7 +200,7 @@ public class SCPDataStageTask implements Task {
     }
 
     private TaskStatus transferFiles(ProcessContext processContext, DataStagingTaskModel subTaskModel,
-                                     TaskContext taskContext, ProcessState processState) {
+                                     TaskContext taskContext, ProcessState processState, RegistryService.Client registryClient) {
         TaskStatus status = new TaskStatus(TaskState.EXECUTING);
 
         try {
@@ -396,8 +407,10 @@ public class SCPDataStageTask implements Task {
             taskContext.getParentProcessContext().getDataMovementRemoteCluster().scpThirdParty(sourceURI.getPath(), srcSession,
                     destinationURI.getPath(), destSession, RemoteCluster.DIRECTION.TO, true);
             // update output locations
-            GFacUtils.saveExperimentOutput(taskContext.getParentProcessContext(), registryClient, taskContext.getProcessOutput().getName(), destinationURI.toString());
-            GFacUtils.saveProcessOutput(taskContext.getParentProcessContext(), registryClient, taskContext.getProcessOutput().getName(), destinationURI.toString());
+            GFacUtils.saveExperimentOutput(taskContext.getParentProcessContext(), registryClient,
+                    taskContext.getProcessOutput().getName(), destinationURI.toString());
+            GFacUtils.saveProcessOutput(taskContext.getParentProcessContext(), registryClient,
+                    taskContext.getProcessOutput().getName(), destinationURI.toString());
         }else{
             log.warn("Destination file path contains unresolved wildcards. Path: " + destinationURI.toString());
         }
