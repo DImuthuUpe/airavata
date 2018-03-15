@@ -987,6 +987,7 @@ public class GFacUtils {
                         } else if (expOutput.getType() == DataType.STRING || expOutput.getType() == DataType.INTEGER ||
                                 expOutput.getType() == DataType.FLOAT) {
                             expOutput.setValue(outputVal);
+                            registryClient.addExperimentProcessOutputs(GFacConstants.EXPERIMENT_OUTPUT, Arrays.asList(expOutput), experimentId);
                         }
                     }
                 }
